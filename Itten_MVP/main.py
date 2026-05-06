@@ -4,6 +4,8 @@ import numpy as np
 import pandas as pd
 from sklearn.cluster import KMeans
 import matplotlib.pyplot as plt
+from matplotlib.colors import rgb_to_hsv
+from skimage.color import rgb2lab
 
 # 1. Настройки приложения
 
@@ -25,6 +27,12 @@ def rgb_to_hex(rgb):
     r, g, b = rgb
     return "#{:02X}{:02X}{:02X}".format(r, g, b)
 
+def hue_distance(h1, h2):
+    # Циклическое расстояние между оттенками hue.
+    d = abs(h1 - h2)
+    d = min(d, 1 - d)
+    return d * 360
+
 def prepare_image(image, max_size=300):
     # Подготавливает изображение для анализа.
     # Что делает:
@@ -41,7 +49,58 @@ def prepare_image(image, max_size=300):
 
     return image, pixels
 
-def extract_dominant_colors(pixels, n_colors=5):
+def select_diverse_colors(colors, proportions, n_final=5,
+    min_hue_dist=20, min_rgb_dist=45, min_saturation=0.15):
+    # Выбирает n_final цветов из списка кандидатов так,
+    # чтобы они были более разнообразными.
+
+    hsv_colors = rgb_to_hsv(colors[np.newaxis, :, :] / 255.0)[0]
+    order = np.argsort(proportions)[::-1]
+    selected_indices = []
+
+    for idx in order:
+        if len(selected_indices) == 0:
+            selected_indices.append(idx)
+            continue
+
+        current_rgb = colors[idx]
+        current_hsv = hsv_colors[idx]
+
+        too_similar = False
+
+        for selected_idx in selected_indices:
+            selected_rgb = colors[selected_idx]
+            selected_hsv = hsv_colors[selected_idx]
+
+            rgb_dist = np.linalg.norm(current_rgb - selected_rgb)
+
+            # Если оба цвета достаточно насыщенные, сравниваем по hue
+            if current_hsv[1] >= min_saturation and selected_hsv[1] >= min_saturation:
+                h_dist = hue_distance(current_hsv[0], selected_hsv[0])
+                if h_dist < min_hue_dist:
+                    too_similar = True
+                    break
+            else:
+                if rgb_dist < min_rgb_dist:
+                    too_similar = True
+                    break
+
+        if not too_similar:
+            selected_indices.append(idx)
+
+        if len(selected_indices) == n_final:
+            break
+    # добираем цвета по доле, если их не хватает
+    if len(selected_indices) < n_final:
+        for idx in order:
+            if idx not in selected_indices:
+                selected_indices.append(idx)
+            if len(selected_indices) == n_final:
+                break
+
+    return selected_indices
+
+def extract_dominant_colors(pixels, n_colors=5, n_candidates=10):
 
     # Выделяет n_colors доминирующих цветов с помощью K-means.
     # pixels — массив вида:
@@ -52,22 +111,37 @@ def extract_dominant_colors(pixels, n_colors=5):
     # ]
 
     kmeans = KMeans(
-        n_clusters=n_colors,
+        n_clusters=n_candidates,
         random_state=42,
         n_init="auto"
     )
 
     kmeans.fit(pixels)
-    colors = kmeans.cluster_centers_
+    colors = kmeans.cluster_centers_.astype(int)
     labels = kmeans.labels_
     # Считает, сколько пикселей попало в каждый кластер
-    counts = np.bincount(labels, minlength=n_colors)
+    counts = np.bincount(labels, minlength=n_candidates)
     # Доля каждого цвета
     proportions = counts / counts.sum()
-    # Округляет цвета до целых значений RGB
-    colors = colors.astype(int)
 
-    return colors, proportions
+    # Выбираем более разнообразные цвета
+    selected_indices = select_diverse_colors(
+        colors=colors,
+        proportions=proportions,
+        n_final=n_colors,
+        min_hue_dist=20,
+        min_rgb_dist=45,
+        min_saturation=0.15
+    )
+
+    final_colors = colors[selected_indices]
+    final_proportions = proportions[selected_indices]
+
+    order = np.argsort(final_proportions)[::-1]
+    final_colors = final_colors[order]
+    final_proportions = final_proportions[order]
+
+    return final_colors, final_proportions
 
 def make_palette_table(colors, proportions):
     # Создаёт таблицу с цветами: номер цвета, HEX, RGB, доля, процент
@@ -179,6 +253,9 @@ if uploaded_file is not None:
 
     st.subheader("Таблица HEX + доли")
     st.dataframe(df, use_container_width=True)
+
+    coverage = df["Доля"].sum()
+    st.write(f"Суммарное покрытие выбранных цветов: {coverage * 100:.2f}%")
 
     st.subheader("Bar chart")
     fig = plot_color_bar_chart(df)
