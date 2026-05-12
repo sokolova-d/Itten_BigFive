@@ -170,7 +170,8 @@ def analyze_itten_contrasts_hsv_lab(df):
     proportions = df["Доля"].to_numpy()
     hex_colors = df["HEX"].to_numpy()
 
-    results = {}
+    descriptions = {}
+    features = {}
 
     # Берём только достаточно насыщенные цвета для hue-анализа
     saturated_mask = saturations >= 0.2
@@ -202,13 +203,15 @@ def analyze_itten_contrasts_hsv_lab(df):
         else:
             level = "сильный"
 
-        results["Контраст цветового тона"] = (
+        descriptions["Контраст цветового тона"] = (
             f"{level}: максимальное расстояние между насыщенными оттенками {hue_range:.1f}°."
         )
+        features["hue_contrast"] = hue_range
     else:
-        results["Контраст цветового тона"] = (
+        descriptions["Контраст цветового тона"] = (
             "Не определяется: в палитре недостаточно насыщенных цветов."
         )
+        features["hue_contrast"] = 0.0
 
     # Light-dark
     light_dark_range = l_values.max() - l_values.min()
@@ -220,9 +223,10 @@ def analyze_itten_contrasts_hsv_lab(df):
     else:
         level = "сильный"
 
-    results["Светло-тёмный контраст"] = (
+    descriptions["Светло-тёмный контраст"] = (
         f"{level}: разброс светлоты L* = {light_dark_range:.1f}."
     )
+    features["light_dark_contrast"] = light_dark_range
 
     # Warm-cool
     warm_weight = 0
@@ -231,21 +235,37 @@ def analyze_itten_contrasts_hsv_lab(df):
     for h, s, p in zip(hues, saturations, proportions):
         weight = p * s
 
-        if (0 <= h <= 70) or (330 <= h <= 360):
+        if (h >= 330) or (h < 150):
             warm_weight += weight
-        elif 160 <= h <= 280:
+        else:
             cool_weight += weight
 
-    warm_cool_score = min(warm_weight, cool_weight)
+    total_temp_weight = warm_weight + cool_weight
 
-    if warm_weight > 0 and cool_weight > 0:
-        results["Тепло-холодный контраст"] = (
-            f"есть: тёплый вклад = {warm_weight:.3f}, холодный вклад = {cool_weight:.3f}."
-        )
+    if total_temp_weight > 0:
+        warm_share = warm_weight / total_temp_weight
+        cool_share = cool_weight / total_temp_weight
+
+        warm_cool_balance_score = 1 - abs(warm_share - cool_share)
+        warm_cool_direction = warm_share - cool_share
     else:
-        results["Тепло-холодный контраст"] = (
-            f"слабый: тёплый вклад = {warm_weight:.3f}, холодный вклад = {cool_weight:.3f}."
-        )
+        warm_share = 0
+        cool_share = 0
+        warm_cool_balance_score = 0
+        warm_cool_direction = 0
+
+    if warm_cool_balance_score < 0.25:
+        level = "слабый"
+    elif warm_cool_balance_score < 0.6:
+        level = "умеренный"
+    else:
+        level = "сильный"
+
+    descriptions["Тепло-холодный контраст"] = (
+        f"{level}: тёплый вклад = {warm_share:.3f}, холодный вклад = {cool_share:.3f}."
+        f"Баланс тёплого и холодного = {warm_cool_balance_score:.3f}."
+    )
+    features["warm_cool_contrast"] = warm_cool_balance_score
 
     # Saturation
     saturation_range = saturations.max() - saturations.min()
@@ -258,10 +278,11 @@ def analyze_itten_contrasts_hsv_lab(df):
     else:
         level = "сильный"
 
-    results["Контраст насыщенности / chroma"] = (
+    descriptions["Насыщенность"] = (
         f"{level}: разброс HSV Saturation = {saturation_range:.3f}, "
         f"разброс Lab Chroma = {chroma_range:.1f}."
     )
+    features["saturation_contrast"] = chroma_range
 
     # Complementary
     best_pair = None
@@ -293,14 +314,25 @@ def analyze_itten_contrasts_hsv_lab(df):
                     best_pair = (saturated_hex[i], saturated_hex[j])
 
     if best_pair is not None and best_distance >= 150:
-        results["Дополнительный контраст"] = (
+        descriptions["Комплиментарность"] = (
             f"найдена близкая к дополнительной пара: "
             f"{best_pair[0]} и {best_pair[1]}, расстояние {best_distance:.1f}°."
         )
+        complementary_pair_found = 1
     else:
-        results["Дополнительный контраст"] = (
+        descriptions["Комплиментарность"] = (
             "явная дополнительная пара не найдена."
         )
+        complementary_pair_found = 0
+
+    if best_distance is None:
+        best_distance_value = 0
+        complementary_distance_error = 180
+    else:
+        best_distance_value = best_distance
+        complementary_distance_error = abs(best_distance - 180)
+
+    features["complementary_contrast"] = best_score
 
     # Extension
     visual_weights = proportions * (1 + chroma_values / 100)
@@ -311,6 +343,8 @@ def analyze_itten_contrasts_hsv_lab(df):
         entropy_norm = entropy / np.log(len(q))
         extension_score = 1 - entropy_norm
     else:
+        entropy = 0
+        entropy_norm = 0
         extension_score = 0
 
     if extension_score < 0.2:
@@ -323,12 +357,12 @@ def analyze_itten_contrasts_hsv_lab(df):
     dominant_color = df.loc[df["Доля"].idxmax(), "HEX"]
     dominant_percent = df.loc[df["Доля"].idxmax(), "Процент"]
 
-    results["Контраст распространения"] = (
+    descriptions["Контраст распространения"] = (
         f"{level}: доминирующий цвет {dominant_color} занимает {dominant_percent}% изображения. "
         f"Оценка с учётом chroma = {extension_score:.3f}."
     )
 
-    return results
+    return descriptions, features
 
 def fit_harmony_scheme_hsv_lab(df):
     # Подбирает цветовую схему по HSV Hue.
@@ -346,6 +380,9 @@ def fit_harmony_scheme_hsv_lab(df):
     if len(df_sat) == 0:
         return {
             "scheme": "Не определяется",
+            "fitting_error": None,
+            "rotation": None,
+            "confidence": "не определяется",
             "description": "В палитре нет достаточно насыщенных цветов для анализа схемы."
         }
 
@@ -561,9 +598,9 @@ if uploaded_file is not None:
 
     st.subheader("Контрасты Иттена по изображению")
 
-    contrasts = analyze_itten_contrasts_hsv_lab(df_analysis)
+    contrast_descriptions, contrast_features = analyze_itten_contrasts_hsv_lab(df_analysis)
 
-    for contrast_name, description in contrasts.items():
+    for contrast_name, description in contrast_descriptions.items():
         st.markdown(f"**{contrast_name}**")
         st.write(description)
 
@@ -572,5 +609,18 @@ if uploaded_file is not None:
     scheme_result = fit_harmony_scheme_hsv_lab(df_analysis)
     st.write(scheme_result["description"])
 
+    st.subheader("Численные признаки для дальнейшего анализа")
+
+    image_features = {
+        **contrast_features,
+        "scheme": scheme_result["scheme"],
+        "scheme_fitting_error": scheme_result["score"],
+        "scheme_rotation": scheme_result["rotation"],
+        "scheme_confidence": scheme_result["confidence"]
+    }
+
+    df_features = pd.DataFrame([image_features])
+
+    st.dataframe(df_features, use_container_width=True)
 else:
     st.info("Пока изображение не загружено.")
