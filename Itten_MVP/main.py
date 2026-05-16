@@ -571,7 +571,7 @@ def load_bigfive_correlations(json_path="itten_correlations_for_code.json"):
 
 
 def normalize_image_features_for_bigfive(image_features):
-    # Приводит признаки изображения к диапазону 0..1,
+    # Приводит признаки изображения к шкале -1..1.
 
     hue = image_features.get("hue_contrast", 0)
     light_dark = image_features.get("light_dark_contrast", 0)
@@ -584,21 +584,24 @@ def normalize_image_features_for_bigfive(image_features):
     if scheme_error is None:
         scheme_error = 180
 
-    normalized = {
+    # Сначала приводим признаки к диапазону 0..1.
+    normalized_0_1 = {
         "hue_contrast": min(hue / 180, 1),
         "light_dark_contrast": min(light_dark / 100, 1),
         "warm_cool_contrast": min(warm_cool, 1),
         "saturation_contrast": min(saturation / 100, 1),
         "complementary_contrast": min(complementary / 0.05, 1),
         "extension_contrast": min(extension, 1),
-
-        # Преобразуем ошибку fitting в гармоничность:
-        # 1 = хорошо попадает в схему,
-        # 0 = плохо попадает в схему.
         "scheme_harmony": max(0, 1 - scheme_error / 180)
     }
 
-    return normalized
+    # Потом центрируем: 0..1 превращается в -1..1.
+    centered = {}
+
+    for feature_name, value in normalized_0_1.items():
+        centered[feature_name] = (value - 0.5) * 2
+
+    return centered
 
 def estimate_bigfive_0_100(image_features):
     # Рассчитывает демонстрационный профиль Big Five в диапазоне 0..100
@@ -627,13 +630,8 @@ def estimate_bigfive_0_100(image_features):
             weighted_sum += feature_value * weight
             abs_weight_sum += abs(weight)
 
-        if abs_weight_sum > 0:
-            normalized_trait_score = weighted_sum / abs_weight_sum
-        else:
-            normalized_trait_score = 0
-
         # Перевод из диапазона примерно -1..1 в диапазон 0..100.
-        score_0_100 = 50 + normalized_trait_score * 50
+        score_0_100 = 50 + weighted_sum * 160
 
         # Ограничиваем диапазон.
         score_0_100 = min(max(score_0_100, 0), 100)
@@ -910,6 +908,7 @@ if uploaded_file is not None:
         **contrast_features,
         "scheme": scheme_result["scheme"],
         "scheme_fitting_error": scheme_result["score"],
+        "scheme_harmony": -scheme_result["score"],
         "scheme_rotation": scheme_result["rotation"],
         "scheme_confidence": scheme_result["confidence"]
     }
